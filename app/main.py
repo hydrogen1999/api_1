@@ -1,14 +1,14 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from web3 import Web3
-import json
-import requests
-import config
+import json,requests, config
+import solcx
+from solcx import compile_standard
 
 app = FastAPI()
 bsc_test = "https://data-seed-prebsc-1-s1.binance.org:8545/"
 bsc = "https://bsc-dataseed.binance.org/"
 
-
+solcx.install_solc('v0.8.0')
 
 @app.get("/") 
 async def Welcome():
@@ -86,3 +86,42 @@ async def mint(receiver, type:int, rarity:int):
     signed_txn = web3.eth.account.sign_transaction(mint, private_key=key)
     tx_token = web3.eth.send_raw_transaction(signed_txn.rawTransaction)
     return {"Minted": web3.toHex(tx_token)}
+
+@app.post("/deploy")
+async def deployContract (rawfile: UploadFile, contractName):
+    web3 = Web3(Web3.HTTPProvider(bsc_test))
+    wallet = web3.toChecksumAddress(config.WALLET_ADDRESS)
+    key = config.PRIVATE_KEY
+
+    try:
+        contents = rawfile.file.read()
+        with open(rawfile.filename, 'wb') as f:
+            f.write(contents)
+    except Exception:
+        return {"message": "There was an error uploading the file"}
+    finally:
+        rawfile.file.close()
+    
+    with open(f"{rawfile.filename}") as file: 
+        contract = file.read()
+    compiled_contract = compile_standard(
+        {
+            "language": "Solidity",
+            "sources": {"test.sol":{"content":contract}},
+            "settings": {"outputSelection": {"*": {"*": ["*"]}}},
+        },
+        solc_version="0.8.0",
+    )
+    with open("contract.json", "w") as file:
+        json.dump(compiled_contract, file)
+    bytecode = compiled_contract['contracts'][f'{rawfile.filename}'][f'{contractName}']['evm']['bytecode']['object']
+    abi = compiled_contract['contracts'][f'{rawfile.filename}'][f'{contractName}']['abi']
+    chainId = 97
+    SimpleStorage = web3.eth.contract(abi=abi, bytecode=bytecode)
+    nonce = web3.eth.getTransactionCount(wallet)
+    transaction = SimpleStorage.constructor().buildTransaction({'chainId': chainId, 'from': wallet, 'nonce': nonce, 'gasPrice': web3.eth.gas_price})
+    signed_transaction = web3.eth.account.signTransaction(transaction, key)
+    tx_hash = web3.eth.sendRawTransaction(signed_transaction.rawTransaction)
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    contract_address = tx_receipt.contractAddress
+    return {"contract": contract_address}
